@@ -1,12 +1,13 @@
 'use client';
 
-import { useState, useRef, isValidElement, type ChangeEvent, type ReactNode } from 'react';
+import { useState, useRef, useCallback, isValidElement, type ChangeEvent, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 // ─── Types ───────────────────────────────────────────────────────────
 type QuestionType = 'auto' | 'essay' | 'lesson-plan';
 type Status = 'idle' | 'streaming' | 'done' | 'error';
+type RefStatus = 'idle' | 'streaming' | 'done' | 'error';
 
 interface ImageItem {
   id: string;
@@ -310,6 +311,11 @@ export default function Page() {
   const [report, setReport] = useState('');
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const [refStatus, setRefStatus] = useState<RefStatus>('idle');
+  const [reference, setReference] = useState('');
+  const [refError, setRefError] = useState<string | null>(null);
+  const refAbortRef = useRef<AbortController | null>(null);
+  const [isThinking, setIsThinking] = useState(false);
 
   const hasQuestion = questionText.trim().length > 0 || questionImages.length > 0;
   const hasAnswer = answerText.trim().length > 0 || answerImages.length > 0;
@@ -365,6 +371,7 @@ export default function Page() {
     setStatus('streaming');
     setReport('');
     setError(null);
+    setIsThinking(false);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -420,12 +427,14 @@ export default function Page() {
 
           try {
             const parsed = JSON.parse(data);
-            const content = parsed?.choices?.[0]?.delta?.content;
-            if (typeof content === 'string') {
-              setReport((prev) => prev + content);
+            if (parsed.type === 'content' && typeof parsed.content === 'string') {
+              setIsThinking(false);
+              setReport((prev) => prev + parsed.content);
+            } else if (parsed.type === 'reasoning') {
+              setIsThinking(true);
             }
           } catch {
-            // Skip malformed JSON lines
+            // skip malformed
           }
         }
       }
@@ -443,12 +452,94 @@ export default function Page() {
   };
 
   const handleBack = () => {
-    if (abortRef.current) {
-      abortRef.current.abort();
-    }
+    if (abortRef.current) abortRef.current.abort();
+    if (refAbortRef.current) refAbortRef.current.abort();
     setStatus('idle');
     setReport('');
     setError(null);
+    setRefStatus('idle');
+    setReference('');
+    setRefError(null);
+    setIsThinking(false);
+  };
+
+  const handleGenerateReference = async () => {
+    if (!report) return;
+
+    setRefStatus('streaming');
+    setReference('');
+    setRefError(null);
+
+    const controller = new AbortController();
+    refAbortRef.current = controller;
+
+    try {
+      const response = await fetch('/api/reference', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: questionText,
+          questionType,
+          diagnosis: report,
+          questionImages: questionImages.map((img) => img.base64),
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        let errorMessage = `请求失败 (${response.status})`;
+        try {
+          const errData = await response.json();
+          if (errData.error) errorMessage = errData.error;
+        } catch {
+          // ignore
+        }
+        throw new Error(errorMessage);
+      }
+
+      if (!response.body) throw new Error('无法读取响应流');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+
+          const data = trimmed.startsWith('data: ') ? trimmed.slice(6) : trimmed.slice(5);
+          if (data === '[DONE]') {
+            setRefStatus('done');
+            return;
+          }
+
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.type === 'content' && typeof parsed.content === 'string') {
+              setReference((prev) => prev + parsed.content);
+            }
+          } catch {
+            // skip malformed
+          }
+        }
+      }
+
+      setRefStatus('done');
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      setRefError(err instanceof Error ? err.message : '参考答案生成失败');
+      setRefStatus('error');
+    } finally {
+      refAbortRef.current = null;
+    }
   };
 
   return (
@@ -676,12 +767,106 @@ export default function Page() {
                     <div className="py-8">
                       <LoadingDots />
                       <p className="text-[0.85rem] text-[var(--color-text-muted)] mt-3">
-                        正在分析题目与答案，生成诊断报告...
+                        {isThinking ? '模型正在阅读题目和知识库，组织诊断思路...' : '正在生成诊断报告...'}
+                      </p>
+                      <p className="text-[0.75rem] text-[var(--color-text-muted)] mt-1 opacity-60">
+                        知识库较大，首次分析通常需要 30-60 秒，请耐心等待
                       </p>
                     </div>
                   )}
                 </div>
               </div>
+
+              {/* Reference Answer Section */}
+              {status === 'done' && (
+                <div className="mt-6">
+                  {refStatus === 'idle' ? (
+                    <button
+                      type="button"
+                      onClick={handleGenerateReference}
+                      className="w-full py-3.5 rounded-lg font-medium text-[0.95rem] bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-hover)] hover:shadow-md transition-all duration-200"
+                    >
+                      生成参考答案
+                    </button>
+                  ) : (
+                    <div
+                      className="bg-[var(--bg-report)] border border-[var(--color-border)] rounded-lg overflow-hidden"
+                      style={{ animation: 'grader-fade-in 0.4s ease-out' }}
+                    >
+                      <div className="flex items-center gap-2 px-6 py-3.5 border-b border-[var(--color-border)] bg-[rgba(199,62,58,0.03)]">
+                        <DocumentIcon className="w-4 h-4 text-[var(--color-accent)]" />
+                        <span className="font-[var(--font-serif)] text-[0.95rem] font-semibold text-[var(--color-accent)]">
+                          参考答案
+                        </span>
+                        {refStatus === 'streaming' && (
+                          <span className="ml-auto flex items-center gap-1.5 text-[0.75rem] text-[var(--color-text-muted)]">
+                            <span
+                              className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]"
+                              style={{ animation: 'grader-breathe 1.5s ease-in-out infinite' }}
+                            />
+                            生成中
+                          </span>
+                        )}
+                        {refStatus === 'done' && (
+                          <span className="ml-auto flex items-center gap-1.5 text-[0.75rem] text-[var(--color-text-muted)]">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-success)]" />
+                            已完成
+                          </span>
+                        )}
+                        {refStatus === 'error' && (
+                          <span className="ml-auto flex items-center gap-1.5 text-[0.75rem] text-[var(--color-text-muted)]">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-error)]" />
+                            出错
+                          </span>
+                        )}
+                      </div>
+                      <div className="px-6 py-5 md-table break-words text-[var(--color-text)]">
+                        {reference ? (
+                          <>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                              {reference}
+                            </ReactMarkdown>
+                            {refStatus === 'streaming' && <StreamingCursor />}
+                            {refStatus === 'error' && (
+                              <div className="mt-4 p-3 bg-[rgba(199,62,58,0.05)] border border-[rgba(199,62,58,0.15)] rounded-md">
+                                <p className="text-[0.8rem] text-[var(--color-error)]">
+                                  参考答案生成中断: {refError}
+                                </p>
+                                <button
+                                  type="button"
+                                  onClick={handleGenerateReference}
+                                  className="mt-2 text-[0.8rem] text-[var(--color-accent)] underline hover:text-[var(--color-accent-hover)] transition-colors"
+                                >
+                                  重新尝试
+                                </button>
+                              </div>
+                            )}
+                          </>
+                        ) : refStatus === 'error' ? (
+                          <div className="py-8 text-center">
+                            <p className="text-[0.9rem] text-[var(--color-error)] font-medium">生成失败</p>
+                            <p className="text-[0.85rem] text-[var(--color-text-muted)] mt-1.5">{refError}</p>
+                            <button
+                              type="button"
+                              onClick={handleGenerateReference}
+                              className="mt-4 inline-flex items-center gap-2 px-4 py-2 text-[0.85rem] font-medium text-white bg-[var(--color-accent)] rounded-md hover:bg-[var(--color-accent-hover)] transition-colors"
+                            >
+                              重新尝试
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="py-8">
+                            <LoadingDots />
+                            <p className="text-[0.85rem] text-[var(--color-text-muted)] mt-3">
+                              正在生成参考答案...
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Back button */}
               <div className="mt-6 flex justify-center">

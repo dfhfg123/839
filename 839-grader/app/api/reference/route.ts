@@ -1,5 +1,20 @@
 import { NextRequest } from "next/server";
-import { buildMessages } from "@/lib/prompt";
+import { buildReferenceMessages } from "@/lib/prompt";
+
+/**
+ * POST /api/reference
+ *
+ * 第二次调用：根据题目 + 诊断报告，生成参考答案。
+ * 以 SSE 流式返回。
+ *
+ * 请求体：
+ * {
+ *   question: string,
+ *   questionType?: "auto" | "essay" | "lesson-plan",
+ *   diagnosis: string,           // 第一轮诊断报告全文
+ *   questionImages?: string[]
+ * }
+ */
 
 const SILICONFLOW_URL = "https://api.siliconflow.cn/v1/chat/completions";
 const MODEL = "moonshotai/Kimi-K2.7-Code";
@@ -16,10 +31,9 @@ export async function POST(req: NextRequest) {
 
   let body: {
     question: string;
-    answer: string;
     questionType?: string;
+    diagnosis: string;
     questionImages?: string[];
-    answerImages?: string[];
   };
 
   try {
@@ -31,24 +45,20 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  const { question, answer, questionType, questionImages, answerImages } = body;
+  const { question, questionType, diagnosis, questionImages } = body;
 
-  const hasQuestion = question?.trim()?.length > 0 || (questionImages?.length ?? 0) > 0;
-  const hasAnswer = answer?.trim()?.length > 0 || (answerImages?.length ?? 0) > 0;
-
-  if (!hasQuestion || !hasAnswer) {
+  if (!question || !diagnosis) {
     return new Response(
-      JSON.stringify({ error: "题目和答案不能为空" }),
+      JSON.stringify({ error: "题目和诊断报告不能为空" }),
       { status: 400, headers: { "Content-Type": "application/json" } }
     );
   }
 
-  const messages = buildMessages({
+  const messages = buildReferenceMessages({
     question,
-    answer,
     questionType,
+    diagnosis,
     questionImages,
-    answerImages,
   });
 
   const sfResponse = await fetch(SILICONFLOW_URL, {
@@ -62,7 +72,7 @@ export async function POST(req: NextRequest) {
       messages,
       stream: true,
       max_tokens: 8192,
-      temperature: 0.6,
+      temperature: 0.7,
       top_p: 0.8,
     }),
   });
