@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: 839-grader
+    runtime: node
+    plan: free
+    rootDir: 839-grader
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: SILICONFLOW_API_KEY
+        sync: false
+    healthCheckPath: /
+    autoDeploy: true
