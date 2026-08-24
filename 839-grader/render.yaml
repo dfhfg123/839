@@ -5,7 +5,7 @@ services:
     plan: free
     rootDir: 839-grader
     buildCommand: npm install && npm run build
-    startCommand: npm run start
+    startCommand: npx next start -H 0.0.0.0 -p $PORT
     envVars:
       - key: SILICONFLOW_API_KEY
         sync: false
